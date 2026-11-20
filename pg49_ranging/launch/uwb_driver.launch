@@ -1,0 +1,16 @@
+<launch>
+    <arg name="port" default="/dev/ttyUSB0" />
+    <arg name="baudrate" default="115200" />
+    
+    <node pkg="pg49_ranging" type="uwb_driver" name="uwb_driver" output="screen">
+        
+        <param name="port" type="string" value="$(arg port)" />
+        <param name="baudrate" type="int" value="$(arg baudrate)" />
+
+        <param name="bias_offset" type="double" value="0.276" />
+
+        <param name="use_kalman" type="bool" value="true" />
+        <param name="process_variance" type="double" value="0.005" />      
+        <param name="measurement_variance" type="double" value="0.04" />   
+    </node>
+</launch>
