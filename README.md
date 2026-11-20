@@ -1,6 +1,8 @@
 # PG49 UWB 测距驱动
 
-适用于 ROS 1 Noetic。驱动通过串口读取 PG49 模块的测距数据，并将距离（米）发布到 `/uwb/distance`。
+适用于 ROS 1 Noetic。驱动通过串口读取 PG49 模块的测距数据，并发布到 `/uwb/distance_stamped`（`pg49_ranging/DistanceStamped`）。
+`distance` 为距离（米），`header.stamp` 为主机完成本批串口读取时的 ROS 时间。
+同一批读取中的多帧共用这个时间戳。设备可选输出的 `t1–t6` 是 UWB 芯片内部的测距计数，与 ROS 时间使用不同的时钟基准。
 
 ## 编译
 

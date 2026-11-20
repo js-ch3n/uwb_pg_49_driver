@@ -1,9 +1,35 @@
 #include <ros/ros.h>
 #include <serial/serial.h>
-#include <std_msgs/Float32.h>
+#include <pg49_ranging/DistanceStamped.h>
 #include <vector>
 #include <cstdint>
 #include <string>
+
+namespace {
+
+uint16_t read_uint16_be(const std::vector<uint8_t>& data, size_t offset) {
+    return (static_cast<uint16_t>(data[offset]) << 8) | data[offset + 1];
+}
+
+bool has_valid_crc(const std::vector<uint8_t>& frame) {
+    const size_t crc_offset = frame.size() - 2;
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < crc_offset; ++i) {
+        crc ^= frame[i];
+        for (int bit = 0; bit < 8; ++bit) {
+            const bool low_bit = (crc & 1) != 0;
+            crc >>= 1;
+            if (low_bit) {
+                crc ^= 0xA001;
+            }
+        }
+    }
+    const uint16_t received = frame[crc_offset] |
+        (static_cast<uint16_t>(frame[crc_offset + 1]) << 8);
+    return crc == received;
+}
+
+}  // namespace
 
 // ====================== 卡尔曼滤波器 ======================
 class KalmanFilter {
@@ -66,32 +92,24 @@ public:
         }
 
         // 距离发布者
-        pub_distance_ = nh_.advertise<std_msgs::Float32>("/uwb/distance", 10);
+        pub_distance_stamped_ =
+            nh_.advertise<pg49_ranging::DistanceStamped>("/uwb/distance_stamped", 10);
     }
 
-    bool parse_frame(const std::vector<uint8_t>& data) {
-        if (data.size() < 20 || data[0] != 0x01 || data[1] != 0x03) {
-            return false;
-        }
-
+    bool parse_frame(const std::vector<uint8_t>& data, const ros::Time& received_at) {
         try {
-            if (data[3] != 0xCA || data[4] != 0xDA) {
-                return false;
-            }
-
-            uint16_t flag = (static_cast<uint16_t>(data[5]) << 8) | data[6];
-            size_t pos_idx = 13;
-
-            if ((flag & 0x01) && (data.size() > pos_idx + 6)) {
-                pos_idx += 6; 
-            }
-
-            if (pos_idx + 2 > data.size() - 2) {
+            const uint16_t output_flags = read_uint16_be(data, 5);
+            const uint16_t ranging_status = read_uint16_be(data, 11);
+            const bool has_position = (output_flags & 0x01) != 0;
+            const bool has_ranges = (output_flags & 0x02) != 0;
+            const bool anchor_a_valid = (ranging_status & 0x01) != 0;
+            const size_t range_offset = has_position ? 19 : 13;
+            if (!has_ranges || !anchor_a_valid || range_offset + 2 > data.size() - 2) {
                 return false;
             }
 
             // 1. 物理层解析
-            uint16_t raw_dist_cm = (static_cast<uint16_t>(data[pos_idx]) << 8) | data[pos_idx + 1];
+            uint16_t raw_dist_cm = read_uint16_be(data, range_offset);
             double raw_dist = raw_dist_cm / 100.0;
 
             if (raw_dist < 0.1) {
@@ -105,9 +123,10 @@ public:
             double filtered_dist = use_kalman_ ? kf_.update(corrected_dist) : corrected_dist;
 
             // 4. ROS 话题发布
-            std_msgs::Float32 dist_msg;
-            dist_msg.data = static_cast<float>(filtered_dist);
-            pub_distance_.publish(dist_msg);
+            pg49_ranging::DistanceStamped stamped_msg;
+            stamped_msg.header.stamp = received_at;
+            stamped_msg.distance = static_cast<float>(filtered_dist);
+            pub_distance_stamped_.publish(stamped_msg);
 
             ROS_INFO_THROTTLE(0.8, "UWB Distance (Calibrated): %.3f m", filtered_dist);
 
@@ -132,23 +151,31 @@ public:
             if (available_bytes > 0) {
                 std::vector<uint8_t> temp_buf;
                 ser_.read(temp_buf, available_bytes);
+                const ros::Time received_at = ros::Time::now();
                 buffer.insert(buffer.end(), temp_buf.begin(), temp_buf.end());
 
-                while (buffer.size() > 30) {
-                    if (buffer[0] == 0x01 && buffer[1] == 0x03) {
-                        uint8_t byte_count = buffer[2];
-                        size_t frame_len = 5 + byte_count + 2;
-
-                        if (buffer.size() >= frame_len) {
-                            std::vector<uint8_t> frame(buffer.begin(), buffer.begin() + frame_len);
-                            parse_frame(frame);
-                            buffer.erase(buffer.begin(), buffer.begin() + frame_len);
-                        } else {
-                            break; 
-                        }
-                    } else {
+                while (buffer.size() >= 5) {
+                    const size_t byte_count = buffer[2];
+                    if (buffer[0] != 0x01 || buffer[1] != 0x03 ||
+                        buffer[3] != 0xCA || buffer[4] != 0xDA ||
+                        byte_count < 10 || byte_count % 2 != 0) {
                         buffer.erase(buffer.begin());
+                        continue;
                     }
+
+                    // Three header bytes, the register data, and two CRC bytes.
+                    const size_t frame_len = 3 + byte_count + 2;
+                    if (buffer.size() < frame_len) {
+                        break;
+                    }
+
+                    const std::vector<uint8_t> frame(buffer.begin(), buffer.begin() + frame_len);
+                    if (!has_valid_crc(frame)) {
+                        buffer.erase(buffer.begin());
+                        continue;
+                    }
+                    parse_frame(frame, received_at);
+                    buffer.erase(buffer.begin(), buffer.begin() + frame_len);
                 }
             }
             ros::spinOnce();
@@ -158,7 +185,7 @@ public:
 
 private:
     ros::NodeHandle nh_;
-    ros::Publisher pub_distance_;
+    ros::Publisher pub_distance_stamped_;
 
     serial::Serial ser_;
     std::string port_;

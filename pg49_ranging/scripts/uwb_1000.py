@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import rospy
-from std_msgs.msg import Float32
+from pg49_ranging.msg import DistanceStamped
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -12,7 +12,7 @@ class BiasTester:
         self.max_samples = 1000
         self.distances = []          # 存所有原始数据
         
-        self.sub = rospy.Subscriber('/uwb/distance', Float32, self.callback)
+        self.sub = rospy.Subscriber('/uwb/distance_stamped', DistanceStamped, self.callback)
         
         rospy.loginfo("零偏测试节点已启动 | 正在采集第一个基站的1000个数据...")
 
@@ -20,7 +20,7 @@ class BiasTester:
         if self.count >= self.max_samples:
             return
             
-        dist = msg.data
+        dist = msg.distance
         
         if dist > 0.1:                     # 过滤无效值
             self.distances.append(dist)

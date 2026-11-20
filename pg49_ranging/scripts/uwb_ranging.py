@@ -2,7 +2,7 @@
 import rospy
 import serial
 import struct
-from std_msgs.msg import Float32
+from pg49_ranging.msg import DistanceStamped
 
 # ====================== 卡尔曼滤波器 ======================
 class KalmanFilter:
@@ -46,14 +46,13 @@ class UWBParser:
         self.ser = serial.Serial(self.port, self.baudrate, timeout=0.05)
         self.ser.flushInput()
         
-        # 只发布第一个基站的距离（单个float）
-        self.pub_distance = rospy.Publisher('/uwb/distance', Float32, queue_size=10)
+        self.pub_distance = rospy.Publisher('/uwb/distance_stamped', DistanceStamped, queue_size=10)
         
         rospy.loginfo(f"PG4.9 UWB 测距节点已启动")
         rospy.loginfo(f" -> 零偏补偿值: {self.bias_offset:+.3f} m")
         rospy.loginfo(f" -> 卡尔曼滤波: {'开启' if self.use_kalman else '关闭'} | Q={self.process_variance}, R={self.measurement_variance}")
 
-    def parse_frame(self, data):
+    def parse_frame(self, data, received_at):
         if len(data) < 20 or data[0] != 0x01 or data[1] != 0x03:
             return False
 
@@ -88,8 +87,9 @@ class UWBParser:
                 filtered_dist = corrected_dist
 
             # 4. ROS 话题发布
-            dist_msg = Float32()
-            dist_msg.data = filtered_dist
+            dist_msg = DistanceStamped()
+            dist_msg.header.stamp = received_at
+            dist_msg.distance = filtered_dist
             self.pub_distance.publish(dist_msg)
 
             rospy.loginfo_throttle(0.8, f"UWB 测距(已校准): {filtered_dist:.3f} m")
@@ -105,14 +105,16 @@ class UWBParser:
 
         while not rospy.is_shutdown():
             if self.ser.in_waiting > 0:
-                buffer += self.ser.read(self.ser.in_waiting)
+                chunk = self.ser.read(self.ser.in_waiting)
+                received_at = rospy.Time.now()
+                buffer += chunk
 
                 while len(buffer) > 30:
                     if buffer[:2] == b'\x01\x03':
                         byte_count = buffer[2]
-                        frame_len = 5 + byte_count + 2
+                        frame_len = 3 + byte_count + 2
                         if len(buffer) >= frame_len:
-                            self.parse_frame(buffer[:frame_len])
+                            self.parse_frame(buffer[:frame_len], received_at)
                             buffer = buffer[frame_len:]
                         else:
                             break
